@@ -809,24 +809,75 @@ struct ThermalStats {
 };
 
 vector<double> extract_scalar_values(const string& filepath, const string& scalar_name) {
-    ifstream vtkfile(filepath.c_str());
+    ifstream vtkfile(filepath.c_str(), ios::binary);
     vector<double> values;
-    string line;
+    if (!vtkfile.is_open()) return values;
 
-    while (getline(vtkfile, line)) {
-        if (line.find("SCALARS " + scalar_name) != string::npos) {
-            while (getline(vtkfile, line)) {
-                if (line.find("LOOKUP_TABLE") != string::npos) break;
-            }
-            while (getline(vtkfile, line)) {
-                if (!line.empty() && isalpha(line[0])) break;
-                istringstream iss(line);
-                double val;
-                while (iss >> val) {
-                    values.push_back(val);
+    // Read entire file into memory for easier parsing
+    string filedata((istreambuf_iterator<char>(vtkfile)), istreambuf_iterator<char>());
+
+    bool is_binary = filedata.find("BINARY") != string::npos;
+
+    if (!is_binary) {
+        // ASCII parsing (original behaviour)
+        istringstream iss(filedata);
+        string line;
+        while (getline(iss, line)) {
+            if (line.find("SCALARS " + scalar_name) != string::npos) {
+                while (getline(iss, line)) {
+                    if (line.find("LOOKUP_TABLE") != string::npos) break;
                 }
+                while (getline(iss, line)) {
+                    if (!line.empty() && isalpha(line[0])) break;
+                    istringstream vl(line);
+                    double val;
+                    while (vl >> val) {
+                        values.push_back(val);
+                    }
+                }
+                break;
             }
-            break;
+        }
+    } else {
+        // Binary VTK parsing
+        size_t point_count = 0;
+        size_t pd_pos = filedata.find("POINT_DATA");
+        if (pd_pos != string::npos) {
+            pd_pos += strlen("POINT_DATA");
+            while (pd_pos < filedata.size() && isspace(static_cast<unsigned char>(filedata[pd_pos]))) pd_pos++;
+            string num;
+            while (pd_pos < filedata.size() && isdigit(static_cast<unsigned char>(filedata[pd_pos]))) {
+                num += filedata[pd_pos++];
+            }
+            point_count = atoi(num.c_str());
+        }
+
+        size_t pos = filedata.find("SCALARS " + scalar_name);
+        if (pos == string::npos) return values;
+
+        pos = filedata.find("LOOKUP_TABLE", pos);
+        if (pos == string::npos) return values;
+        pos = filedata.find("\n", pos);
+        if (pos == string::npos) return values;
+        pos++; // start of binary data
+
+        size_t bytes_available = filedata.size() - pos;
+        if (point_count == 0 || bytes_available < point_count * 4) {
+            point_count = bytes_available / 4; // best effort
+        }
+
+        values.reserve(point_count);
+        for (size_t i = 0; i < point_count; ++i) {
+            size_t idx = pos + i * 4;
+            if (idx + 4 > filedata.size()) break;
+            unsigned char b0 = static_cast<unsigned char>(filedata[idx]);
+            unsigned char b1 = static_cast<unsigned char>(filedata[idx + 1]);
+            unsigned char b2 = static_cast<unsigned char>(filedata[idx + 2]);
+            unsigned char b3 = static_cast<unsigned char>(filedata[idx + 3]);
+            unsigned char arr[4] = {b3, b2, b1, b0};
+            float f;
+            memcpy(&f, arr, 4);
+            values.push_back(static_cast<double>(f));
         }
     }
     return values;
